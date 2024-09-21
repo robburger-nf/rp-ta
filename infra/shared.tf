@@ -3,9 +3,9 @@
 ########
 locals {
   shared_tags = {
-    "robburger:owner"       = "Rob Burger"
-    "robburger:provisioner" = "Terraform"
-    "robburger:system"      = "rp-ta"
-    "robburger:workspace"   = "rp-ta"
+    "root:owner"       = "Rob Burger"
+    "root:provisioner" = "Terraform"
+    "root:system"      = "rp-ta"
+    "root:workspace"   = "rp-ta"
   }
 }
