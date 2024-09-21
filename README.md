@@ -68,3 +68,49 @@ Each account that needs to run compute resources would need, at minimum the foll
 - **NAT gateway:** this is a device that allows resources in private subnets to communicate with the public internet. It does not allow access *from* the internet to connect to the resources.
 
 In addition to the above, supporting resources such as load-balancers (to spread incoming requests amoung multiple compute instances), VPC endpoints (which allow routing to AWS services such as S3 over internal IP ranges so that it doesn't go over the internet) and VPC peering (which connects multiple VPC together) can be created to support the platform architecture.
+
+### Terraform Implementation
+
+In the [`infra`](./infra/) directory is an example Terraform implementation that creates the following:
+
+- Terraform Modules:
+  - AWS Account: this module provisions a new AWS account under the provided OU.
+  - AWS KMS Key: this module is used to create KMS keys with some default attached policies to prevent loss of management.
+- An AWS Budget set to alert on $0 usage. The email address is configured as a variable in Terraform Cloud.
+- An AWS Organization with two OUs: `core` and `sandbox`.
+- An AWS Account (`security`), in which audit trails and logs will be stored.
+- An AWS KMS Key which will be used for encrypting logs in all accounts.
+- AWS IAM Roles required for initialising [AWS Control Tower](https://docs.aws.amazon.com/controltower/latest/userguide/what-is-control-tower.html).
+- An AWS Control Tower Landing Zone, which will be used to programatically request new accounts in sub-OUs.
+
+This project is set up in Terraform Cloud, and the plan output is as follows:
+
+![plan-output](./.github/images/tfc-plan-output.png)
+
+Authentication to the AWS account being used to run this plan against is configured using a federated OIDC provider, linking TCF and the AWS account so that no long-term credentials are used. When a `plan` or `apply` is requested by TFC, a request is sent to the AWS STS service for a short-term credential (IAM key) that is then used for the run.
+
+#### Provisioning Accounts
+
+This implementation *does not* spin up the accounts or OUs as described in the initial architectural diagram, nor does is create managed resources within these accounts. The configuration for this would take a few days to design the required CloudFormation Stack and Service Catalog resources, and I've elected not to do this. I can give a high-level overview of what this would entail.
+
+In order to automate the provisioning of accounts with a default set of resources, AWS Control Tower makes use of the Service Catalog, and a CloudFormation Stack. In the Service Catalog, we'd have all the required VPC networking templates and IAM Roles and Policies that would be created in any additional requested accounts. These resources would be created at the time of account creation, and would allow us to switch roles into these accounts in order to manage them.
+
+There are two ways to provision new accounts. The first is to make use of the [Service Catalog Account Factory](https://docs.aws.amazon.com/controltower/latest/userguide/provision-as-end-user.html), which uses the AWS Console to request and create accounts. The second, and recommended way, is to make use of the [Account Factory for Terraform](https://docs.aws.amazon.com/controltower/latest/userguide/taf-account-provisioning.html) (AFT). The latter requires setting up an additional AWS account which becomes the AFT Management account using the provided Terraform [module](https://github.com/aws-ia/terraform-aws-control_tower_account_factory). This account automates the provisioning of new AWS accounts and their addition to Control Tower as managed accounts. A new account request is created by writing a Terraform file with the required attributes. An example of this can be found [here](https://github.com/aws-ia/terraform-aws-control_tower_account_factory/blob/main/sources/aft-customizations-repos/aft-account-request/examples/account-request.tf).
+
+## Discussion Questions
+
+### Multi-Client Environment Strategy
+
+As can be seen in the above examples and architectures, using multiple AWS accounts is the easiest and most secure way of isolating client environments. By using separate accounts, we reduce the risk of accidental access being granted as the IAM permissions are far less complex. As an example, if all client environments were created in a single account and we wanted to limit the permissions of users to only certain resources, this would require creating IAM roles with very fine-grained `resource` permissions. Using a multi-account strategy, access to client resources is simply a matter of creating an IAM role in the sub-account and granting access to the user that needs to manage it. Additional IAM roles could be created for different *types* of users based on their required permissions.
+
+By using accounts as a means to isolation, this gives us the ability to scale up to 10000, which is the maximum number of AWS accounts that can be managed under a single AWS Organization. This is in contrast to the various (far lower) limits imposed on the number of VPC and networking resources in a single account.
+
+In terms of regulation, we can use Service Control Policies (SCPs) applied at strategic OU levels to manage and govern the rules applied to each account under said OU. This, combined with the usage of Control Tower to manage AWS Config and GuardDuty services, allows us to make a single change at a high-level that would apply to all accounts.
+
+### Compliance and Risk Considerations
+
+As outlined above, using well-defined OUs, SCPs, account templating and control, reduces the burden of managing individual resources and rather moves the configuration and management up to a higher level where we can be assured that any policies being applied, are filtered down and applied to all resources.
+
+The biggest risk of this architecture is the misconfiguration of policies at the management level. If users are incorrectly given permissions, this could filter down to all affected accounts. Likewise if policies are created that prevent the normal/required operating of client environments, this has the potential to break things. Both of these risks can be mitigated by applying SCPs and other potentially disruptive changes to a subset of "sandbox" accounts with example client infrastructure. This would grant the opportunity of testing that changes have the required outcome.
+
+Again, because of the use of centralised management using AWS Organizations and SCPs, changes to regulation can be easilly applied to all accounts and managed resources.
